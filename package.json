@@ -1,0 +1,27 @@
+{
+  "name": "@striderlabs/mcp-traderjoes",
+  "version": "1.0.0",
+  "description": "MCP connector for Trader Joe's grocery",
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-traderjoes": "dist/index.js"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --outfile=dist/index.js --external:@modelcontextprotocol/sdk",
+    "dev": "tsx src/index.ts"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "keywords": ["mcp", "traderjoes", "grocery", "model-context-protocol"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.0.0",
+    "@types/node": "^22.0.0"
+  }
+}
