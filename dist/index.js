@@ -46,12 +46,11 @@ async function searchProducts(query, pageSize = 10) {
 }
 async function getProductDetails(sku) {
   const body = JSON.stringify({
-    operationName: "GetProduct",
+    operationName: "SearchProduct",
     variables: { storeCode: "TJ", published: "1", sku },
-    query: `query GetProduct($storeCode: String, $published: String, $sku: String) {
+    query: `query SearchProduct($sku: String, $storeCode: String = "TJ", $published: String = "1") {
       products(
-        filter: { store_code: { eq: $storeCode }, published: { eq: $published }, sku: { eq: $sku } }
-        pageSize: 1
+        filter: { sku: { eq: $sku }, store_code: { eq: $storeCode }, published: { eq: $published } }
       ) {
         items {
           sku
@@ -60,14 +59,29 @@ async function getProductDetails(sku) {
           primary_image_meta { url }
           price_range { minimum_price { regular_price { value currency } final_price { value currency } } }
           categories { name url_key }
-          custom_attributesV2 {
-            items {
-              code
-              ... on AttributeValue { value }
-              ... on AttributeSelectedOptions { selected_options { label value } }
-            }
+          item_title
+          item_description
+          item_story_marketing
+          item_story_qil
+          fun_tags
+          primary_image
+          sales_size
+          sales_uom_description
+          country_of_origin
+          first_published_date
+          nutrition {
+            display_sequence
+            panel_id
+            panel_title
+            serving_size
+            calories_per_serving
+            servings_per_container
+            details { display_seq nutritional_item amount percent_dv }
           }
+          ingredients { display_sequence ingredient }
+          allergens { display_sequence ingredient }
         }
+        total_count
       }
     }`
   });
@@ -84,43 +98,69 @@ async function getProductDetails(sku) {
 }
 
 function enrichProduct(item) {
-  const attrs = {};
-  for (const a of item.custom_attributesV2?.items ?? []) {
-    attrs[a.code] = a.value !== undefined
-      ? a.value
-      : (a.selected_options ?? []).map((o) => o.label ?? o.value);
-  }
-  const parseJson = (code) => {
-    const raw = attrs[code];
-    if (raw === undefined) return undefined;
-    try { return JSON.parse(raw); } catch { return raw; }
-  };
-  const images = parseJson("primary_image");
-  const primaryImage = Array.isArray(images)
-    ? (images.find((i) => i.store_code === "TJ")?.value ?? images[0]?.value)
-    : attrs.primary_image;
   return {
     sku: item.sku,
-    name: attrs.item_title || item.name,
+    name: item.item_title || item.name,
     url_key: item.url_key,
-    description: attrs.item_story_marketing || attrs.item_story_qil,
-    size: attrs.sales_size ? `${attrs.sales_size} ${attrs.sales_uom_description ?? ""}`.trim() : undefined,
-    price: item.price_range?.minimum_price?.regular_price ?? null,
-    primary_image: primaryImage,
+    description: item.item_story_marketing || item.item_story_qil,
+    size: item.sales_size ? `${item.sales_size} ${item.sales_uom_description ?? ""}`.trim() : undefined,
+    price: item.price_range?.minimum_price?.final_price ?? null,
+    primary_image: item.primary_image,
     categories: item.categories,
-    fun_tags: attrs.fun_tags,
-    country_of_origin: attrs.country_of_origin,
-    first_published_date: attrs.first_published_date,
-    ingredients: parseJson("ingredients"),
-    nutrition: parseJson("nutrition"),
-    allergens: parseJson("allergens"),
-    directions: parseJson("directions")
+    fun_tags: item.fun_tags,
+    country_of_origin: item.country_of_origin,
+    first_published_date: item.first_published_date,
+    ingredients: (item.ingredients ?? []).map((i) => i.ingredient),
+    nutrition: item.nutrition,
+    allergens: (item.allergens ?? []).map((a) => a.ingredient)
   };
 }
+const STORE_API_URL = "https://alphaapi.brandify.com/rest";
+const STORE_APP_KEY = "8BC3433A-60FC-11E3-991D-B2EE0C70A832";
+const STORE_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
 async function findStores(zip, radius = 25) {
-  throw new Error(
-    "Store search is not available via Trader Joe's public GraphQL API (the storeSearch field does not exist and pickupLocations returns no data). Use https://locations.traderjoes.com or a third-party store dataset instead."
-  );
+  const body = JSON.stringify({
+    request: {
+      appkey: STORE_APP_KEY,
+      formdata: {
+        geoip: 0,
+        dataview: "store_default",
+        limit: 50,
+        geolocs: { geoloc: [{ addressline: zip, country: "US", latitude: "", longitude: "" }] },
+        searchradius: String(radius),
+        where: { warehouse: { distinctfrom: "1" } },
+        false: "0"
+      }
+    }
+  });
+  const res = await fetch(`${STORE_API_URL}/locatorsearch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+  const json = await res.json();
+  const collection = json?.response?.collection ?? [];
+  return {
+    query: zip,
+    radius,
+    centerpoint: json?.response?.attributes?.centerpoint ?? null,
+    total: collection.length,
+    stores: collection.map((s) => ({
+      name: s.name,
+      address: [s.address1, s.address2, s.city, s.state, s.postalcode].filter(Boolean).join(", "),
+      phone: s.phone || null,
+      latitude: s.latitude ? Number(s.latitude) : null,
+      longitude: s.longitude ? Number(s.longitude) : null,
+      hours: (s.bho ?? []).map((h, i) => ({
+        day: STORE_DAYS[i] ?? null,
+        open: h[0],
+        close: h[1]
+      })),
+      website: s.website || null
+    }))
+  };
 }
 async function getFeaturedProducts(category) {
   const body = JSON.stringify({
