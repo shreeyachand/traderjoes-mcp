@@ -25,17 +25,11 @@ async function searchProducts(query, pageSize = 10) {
       ) {
         items {
           sku
-          item_title
-          category_hierarchy { id name url_key }
-          primary_image
-          primary_image_meta { url caption }
-          sales_size
-          sales_uom_description
-          retail_price
-          fun_tags
-          item_characteristics
-          new_product
-          fearless_flyer_applicable
+          name
+          url_key
+          primary_image_meta { url }
+          price_range { minimum_price { regular_price { value currency } final_price { value currency } } }
+          categories { name url_key }
         }
         total_count
         page_info { current_page page_size total_pages }
@@ -61,21 +55,18 @@ async function getProductDetails(sku) {
       ) {
         items {
           sku
-          item_title
-          category_hierarchy { id name url_key }
-          primary_image
-          primary_image_meta { url caption }
-          sales_size
-          sales_uom_description
-          retail_price
-          fun_tags
-          item_characteristics
-          new_product
-          fearless_flyer_applicable
-          ingredients
-          nutrition_facts { calories total_fat saturated_fat trans_fat cholesterol sodium total_carbohydrate dietary_fiber total_sugars protein }
-          allergens
-          directions
+          name
+          url_key
+          primary_image_meta { url }
+          price_range { minimum_price { regular_price { value currency } final_price { value currency } } }
+          categories { name url_key }
+          custom_attributesV2 {
+            items {
+              code
+              ... on AttributeValue { value }
+              ... on AttributeSelectedOptions { selected_options { label value } }
+            }
+          }
         }
       }
     }`
@@ -86,39 +77,50 @@ async function getProductDetails(sku) {
     body
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-  return res.json();
+  const json = await res.json();
+  const item = json?.data?.products?.items?.[0];
+  if (!item) return json;
+  return { ...json, data: { products: { items: [enrichProduct(item)] } } };
+}
+
+function enrichProduct(item) {
+  const attrs = {};
+  for (const a of item.custom_attributesV2?.items ?? []) {
+    attrs[a.code] = a.value !== undefined
+      ? a.value
+      : (a.selected_options ?? []).map((o) => o.label ?? o.value);
+  }
+  const parseJson = (code) => {
+    const raw = attrs[code];
+    if (raw === undefined) return undefined;
+    try { return JSON.parse(raw); } catch { return raw; }
+  };
+  const images = parseJson("primary_image");
+  const primaryImage = Array.isArray(images)
+    ? (images.find((i) => i.store_code === "TJ")?.value ?? images[0]?.value)
+    : attrs.primary_image;
+  return {
+    sku: item.sku,
+    name: attrs.item_title || item.name,
+    url_key: item.url_key,
+    description: attrs.item_story_marketing || attrs.item_story_qil,
+    size: attrs.sales_size ? `${attrs.sales_size} ${attrs.sales_uom_description ?? ""}`.trim() : undefined,
+    price: item.price_range?.minimum_price?.regular_price ?? null,
+    primary_image: primaryImage,
+    categories: item.categories,
+    fun_tags: attrs.fun_tags,
+    country_of_origin: attrs.country_of_origin,
+    first_published_date: attrs.first_published_date,
+    ingredients: parseJson("ingredients"),
+    nutrition: parseJson("nutrition"),
+    allergens: parseJson("allergens"),
+    directions: parseJson("directions")
+  };
 }
 async function findStores(zip, radius = 25) {
-  const url = `https://www.traderjoes.com/api/graphql`;
-  const body = JSON.stringify({
-    operationName: "SearchStores",
-    variables: { zip, radius, pageSize: 10, currentPage: 1 },
-    query: `query SearchStores($zip: String, $radius: Int, $pageSize: Int, $currentPage: Int) {
-      storeSearch(zip: $zip, radius: $radius, pageSize: $pageSize, currentPage: $currentPage) {
-        items {
-          storeCode
-          storeName
-          addressLine1
-          addressLine2
-          city
-          state
-          zip
-          phone
-          hours {
-            Mon Tue Wed Thu Fri Sat Sun
-          }
-        }
-        total_count
-      }
-    }`
-  });
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-  return res.json();
+  throw new Error(
+    "Store search is not available via Trader Joe's public GraphQL API (the storeSearch field does not exist and pickupLocations returns no data). Use https://locations.traderjoes.com or a third-party store dataset instead."
+  );
 }
 async function getFeaturedProducts(category) {
   const body = JSON.stringify({
@@ -132,20 +134,17 @@ async function getFeaturedProducts(category) {
     },
     query: `query FeaturedProducts($storeCode: String, $published: String, $pageSize: Int, $currentPage: Int) {
       products(
-        filter: { store_code: { eq: $storeCode }, published: { eq: $published }, new_product: { eq: "1" } }
+        filter: { store_code: { eq: $storeCode }, published: { eq: $published }, new_product: { match: "1" } }
         pageSize: $pageSize
         currentPage: $currentPage
-        sort: { new_product: DESC }
       ) {
         items {
           sku
-          item_title
-          retail_price
-          primary_image
-          sales_size
-          sales_uom_description
-          fun_tags
-          new_product
+          name
+          url_key
+          primary_image_meta { url }
+          price_range { minimum_price { regular_price { value currency } final_price { value currency } } }
+          categories { name url_key }
         }
         total_count
       }
@@ -157,7 +156,17 @@ async function getFeaturedProducts(category) {
     body
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-  return res.json();
+  const json = await res.json();
+  if (category && json?.data?.products?.items) {
+    const term = category.toLowerCase();
+    const matches = (it) => (it.categories ?? []).some(
+      (c) => c.name.toLowerCase().includes(term) || c.url_key.toLowerCase().includes(term)
+    );
+    const items = json.data.products.items.filter(matches);
+    json.data.products.items = items;
+    json.data.products.total_count = items.length;
+  }
+  return json;
 }
 var TOOLS = [
   {
