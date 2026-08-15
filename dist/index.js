@@ -25,17 +25,11 @@ async function searchProducts(query, pageSize = 10) {
       ) {
         items {
           sku
-          item_title
-          category_hierarchy { id name url_key }
-          primary_image
-          primary_image_meta { url caption }
-          sales_size
-          sales_uom_description
-          retail_price
-          fun_tags
-          item_characteristics
-          new_product
-          fearless_flyer_applicable
+          name
+          url_key
+          primary_image_meta { url }
+          price_range { minimum_price { regular_price { value currency } final_price { value currency } } }
+          categories { name url_key }
         }
         total_count
         page_info { current_page page_size total_pages }
@@ -52,31 +46,42 @@ async function searchProducts(query, pageSize = 10) {
 }
 async function getProductDetails(sku) {
   const body = JSON.stringify({
-    operationName: "GetProduct",
+    operationName: "SearchProduct",
     variables: { storeCode: "TJ", published: "1", sku },
-    query: `query GetProduct($storeCode: String, $published: String, $sku: String) {
+    query: `query SearchProduct($sku: String, $storeCode: String = "TJ", $published: String = "1") {
       products(
-        filter: { store_code: { eq: $storeCode }, published: { eq: $published }, sku: { eq: $sku } }
-        pageSize: 1
+        filter: { sku: { eq: $sku }, store_code: { eq: $storeCode }, published: { eq: $published } }
       ) {
         items {
           sku
+          name
+          url_key
+          primary_image_meta { url }
+          price_range { minimum_price { regular_price { value currency } final_price { value currency } } }
+          categories { name url_key }
           item_title
-          category_hierarchy { id name url_key }
+          item_description
+          item_story_marketing
+          item_story_qil
+          fun_tags
           primary_image
-          primary_image_meta { url caption }
           sales_size
           sales_uom_description
-          retail_price
-          fun_tags
-          item_characteristics
-          new_product
-          fearless_flyer_applicable
-          ingredients
-          nutrition_facts { calories total_fat saturated_fat trans_fat cholesterol sodium total_carbohydrate dietary_fiber total_sugars protein }
-          allergens
-          directions
+          country_of_origin
+          first_published_date
+          nutrition {
+            display_sequence
+            panel_id
+            panel_title
+            serving_size
+            calories_per_serving
+            servings_per_container
+            details { display_seq nutritional_item amount percent_dv }
+          }
+          ingredients { display_sequence ingredient }
+          allergens { display_sequence ingredient }
         }
+        total_count
       }
     }`
   });
@@ -86,39 +91,76 @@ async function getProductDetails(sku) {
     body
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-  return res.json();
+  const json = await res.json();
+  const item = json?.data?.products?.items?.[0];
+  if (!item) return json;
+  return { ...json, data: { products: { items: [enrichProduct(item)] } } };
 }
+
+function enrichProduct(item) {
+  return {
+    sku: item.sku,
+    name: item.item_title || item.name,
+    url_key: item.url_key,
+    description: item.item_story_marketing || item.item_story_qil,
+    size: item.sales_size ? `${item.sales_size} ${item.sales_uom_description ?? ""}`.trim() : undefined,
+    price: item.price_range?.minimum_price?.final_price ?? null,
+    primary_image: item.primary_image,
+    categories: item.categories,
+    fun_tags: item.fun_tags,
+    country_of_origin: item.country_of_origin,
+    first_published_date: item.first_published_date,
+    ingredients: (item.ingredients ?? []).map((i) => i.ingredient),
+    nutrition: item.nutrition,
+    allergens: (item.allergens ?? []).map((a) => a.ingredient)
+  };
+}
+const STORE_API_URL = "https://alphaapi.brandify.com/rest";
+const STORE_APP_KEY = "8BC3433A-60FC-11E3-991D-B2EE0C70A832";
+const STORE_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
 async function findStores(zip, radius = 25) {
-  const url = `https://www.traderjoes.com/api/graphql`;
   const body = JSON.stringify({
-    operationName: "SearchStores",
-    variables: { zip, radius, pageSize: 10, currentPage: 1 },
-    query: `query SearchStores($zip: String, $radius: Int, $pageSize: Int, $currentPage: Int) {
-      storeSearch(zip: $zip, radius: $radius, pageSize: $pageSize, currentPage: $currentPage) {
-        items {
-          storeCode
-          storeName
-          addressLine1
-          addressLine2
-          city
-          state
-          zip
-          phone
-          hours {
-            Mon Tue Wed Thu Fri Sat Sun
-          }
-        }
-        total_count
+    request: {
+      appkey: STORE_APP_KEY,
+      formdata: {
+        geoip: 0,
+        dataview: "store_default",
+        limit: 50,
+        geolocs: { geoloc: [{ addressline: zip, country: "US", latitude: "", longitude: "" }] },
+        searchradius: String(radius),
+        where: { warehouse: { distinctfrom: "1" } },
+        false: "0"
       }
-    }`
+    }
   });
-  const res = await fetch(url, {
+  const res = await fetch(`${STORE_API_URL}/locatorsearch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-  return res.json();
+  const json = await res.json();
+  const collection = json?.response?.collection ?? [];
+  return {
+    query: zip,
+    radius,
+    centerpoint: json?.response?.attributes?.centerpoint ?? null,
+    total: collection.length,
+    stores: collection.map((s) => ({
+      name: s.name,
+      address: [s.address1, s.address2, s.city, s.state, s.postalcode].filter(Boolean).join(", "),
+      phone: s.phone || null,
+      latitude: s.latitude ? Number(s.latitude) : null,
+      longitude: s.longitude ? Number(s.longitude) : null,
+      hours: (s.bho ?? []).map((h, i) => ({
+        day: STORE_DAYS[i] ?? null,
+        open: h[0],
+        close: h[1]
+      })),
+      website: s.website || null
+    }))
+  };
 }
 async function getFeaturedProducts(category) {
   const body = JSON.stringify({
@@ -132,20 +174,17 @@ async function getFeaturedProducts(category) {
     },
     query: `query FeaturedProducts($storeCode: String, $published: String, $pageSize: Int, $currentPage: Int) {
       products(
-        filter: { store_code: { eq: $storeCode }, published: { eq: $published }, new_product: { eq: "1" } }
+        filter: { store_code: { eq: $storeCode }, published: { eq: $published }, new_product: { match: "1" } }
         pageSize: $pageSize
         currentPage: $currentPage
-        sort: { new_product: DESC }
       ) {
         items {
           sku
-          item_title
-          retail_price
-          primary_image
-          sales_size
-          sales_uom_description
-          fun_tags
-          new_product
+          name
+          url_key
+          primary_image_meta { url }
+          price_range { minimum_price { regular_price { value currency } final_price { value currency } } }
+          categories { name url_key }
         }
         total_count
       }
@@ -157,7 +196,17 @@ async function getFeaturedProducts(category) {
     body
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-  return res.json();
+  const json = await res.json();
+  if (category && json?.data?.products?.items) {
+    const term = category.toLowerCase();
+    const matches = (it) => (it.categories ?? []).some(
+      (c) => c.name.toLowerCase().includes(term) || c.url_key.toLowerCase().includes(term)
+    );
+    const items = json.data.products.items.filter(matches);
+    json.data.products.items = items;
+    json.data.products.total_count = items.length;
+  }
+  return json;
 }
 var TOOLS = [
   {
